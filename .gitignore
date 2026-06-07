@@ -3,3 +3,11 @@
 *~
 a.out
 *.class
+wechat.md
+flops
+flops_go
+flops.O3
+flops.dbg
+flops_rs/target/
+.codegraph/
+.reasonix/

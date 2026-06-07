@@ -1,592 +1,592 @@
-#!/usr/local/bin/python
-
-#/*****************************/
-#/*          flops.c          */
-#/* Version 2.0,  18 Dec 1992 */
-#/*         Al Aburto         */
-#/*      aburto@nosc.mil      */
-#/*****************************/
-
-__author__ = 'Brian Olson'
-# modified by CycleUser
+#!/usr/bin/env python3
 """
-/*
-   Flops.c is a 'c' program which attempts to estimate your systems
-   floating-point 'MFLOPS' rating for the FADD, FSUB, FMUL, and FDIV
-   operations based on specific 'instruction mixes' (discussed below).
-   The program provides an estimate of PEAK MFLOPS performance by making
-   maximal use of register variables with minimal interaction with main
-   memory. The execution loops are all small so that they will fit in
-   any cache. Flops.c can be used along with Linpack and the Livermore
-   kernels (which exersize memory much more extensively) to gain further
-   insight into the limits of system performance. The flops.c execution
-   modules also include various percent weightings of FDIV's (from 0% to
-   25% FDIV's) so that the range of performance can be obtained when
-   using FDIV's. FDIV's, being computationally more intensive than
-   FADD's or FMUL's, can impact performance considerably on some systems.
-   
-   Flops.c consists of 8 independent modules (routines) which, except for
-   module 2, conduct numerical integration of various functions. Module
-   2, estimates the value of pi based upon the Maclaurin series expansion
-   of atan(1). MFLOPS ratings are provided for each module, but the
-   programs overall results are summerized by the MFLOPS(1), MFLOPS(2),
-   MFLOPS(3), and MFLOPS(4) outputs.
+flops.py — Floating-point benchmark V3.0 (modernized, parallel edition)
 
-   The MFLOPS(1) result is identical to the result provided by all
-   previous versions of flops.c. It is based only upon the results from
-   modules 2 and 3. Two problems surfaced in using MFLOPS(1). First, it
-   was difficult to completely 'vectorize' the result due to the 
-   recurrence of the 's' variable in module 2. This problem is addressed
-   in the MFLOPS(2) result which does not use module 2, but maintains
-   nearly the same weighting of FDIV's (9.2%) as in MFLOPS(1) (9.6%).
-   The second problem with MFLOPS(1) centers around the percentage of
-   FDIV's (9.6%) which was viewed as too high for an important class of
-   problems. This concern is addressed in the MFLOPS(3) result where NO
-   FDIV's are conducted at all. 
-   
-   The number of floating-point instructions per iteration (loop) is
-   given below for each module executed:
+Based on flops.c v2.0 (18 Dec 1992) by Al Aburto <aburto@nosc.mil>
+Python port by Brian Olson, modernized by CycleUser.
 
-   MODULE   FADD   FSUB   FMUL   FDIV   TOTAL  Comment
-     1        7      0      6      1      14   7.1%  FDIV's
-     2        3      2      1      1       7   difficult to vectorize.
-     3        6      2      9      0      17   0.0%  FDIV's
-     4        7      0      8      0      15   0.0%  FDIV's
-     5       13      0     15      1      29   3.4%  FDIV's
-     6       13      0     16      0      29   0.0%  FDIV's
-     7        3      3      3      3      12   25.0% FDIV's
-     8       13      0     17      0      30   0.0%  FDIV's
-   
-   A*2+3     21     12     14      5      52   A=5, MFLOPS(1), Same as
-	   40.4%  23.1%  26.9%  9.6%          previous versions of the
-						flops.c program. Includes
-						only Modules 2 and 3, does
-						9.6% FDIV's, and is not
-						easily vectorizable.
-   
-   1+3+4     58     14     66     14     152   A=4, MFLOPS(2), New output
-   +5+6+    38.2%  9.2%   43.4%  9.2%          does not include Module 2,
-   A*7                                         but does 9.2% FDIV's.
-   
-   1+3+4     62      5     74      5     146   A=0, MFLOPS(3), New output
-   +5+6+    42.9%  3.4%   50.7%  3.4%          does not include Module 2,
-   7+8                                         but does 3.4% FDIV's.
+New in V3:
+  - multiprocessing (true multi-core) + threading (GIL-bottlenecked) modes
+  - NumPy vectorized acceleration (optional)
+  - argparse CLI with many options
+  - JSON / table output
+  - --all-modes to compare across strategies
+  - Progress indication
+  - Statistical summary (multiple runs)
 
-   3+4+6     39      2     50      0      91   A=0, MFLOPS(4), New output
-   +8       42.9%  2.2%   54.9%  0.0%          does not include Module 2,
-						and does NO FDIV's.
-
-   NOTE: Various timer routines are included as indicated below. The
-	timer routines, with some comments, are attached at the end 
-	of the main program.
-
-   NOTE: Please do not remove any of the printouts.
-
-   EXAMPLE COMPILATION:
-   UNIX based systems
-       cc -DUNIX -O flops.c -o flops
-       cc -DUNIX -DROPT flops.c -o flops 
-       cc -DUNIX -fast -O4 flops.c -o flops 
-       .
-       .
-       .
-     etc.
-
-   Al Aburto
-   aburto@nosc.mil
-*/
+Usage:
+  python flops.py                       # auto cores, multiprocessing
+  python flops.py -j 1                  # serial baseline
+  python flops.py -j 4 --mode mp        # 4-process multiprocessing
+  python flops.py -j 4 --mode thread    # 4-thread (GIL demo)
+  python flops.py --numpy               # NumPy vectorized mode
+  python flops.py --all-modes --json    # compare everything, JSON out
 """
 
+import argparse
+import json
 import math
+import os
+import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from multiprocessing import cpu_count
 
-def dtime(p):
-   q = p[2]
-   p[2] = time.time()
-   p[1] = p[2] - q
+# ── coefficients ──────────────────────────────────────────────────────────
+
+A = [
+    1.0, -0.1666666666671334, 0.833333333809067e-2,
+    0.198412715551283e-3, 0.27557589750762e-5,
+    0.2507059876207e-7, 0.164105986683e-9
+]
+B = [
+    1.0, -0.4999999999982, 0.4166666664651e-1,
+    -0.1388888805755e-2, 0.24801428034e-4,
+    -0.2754213324e-6, 0.20189405e-8
+]
+D = [0.3999999946405e-1, 0.96e-3, 0.1233153e-5]
+E = [0.48e-3, 0.411051e-6]
+
+PIREF = 3.14159265358979324
+DEFAULT_TLIMIT = 15.0
+DEFAULT_NLIMIT = 512_000_000
+INITIAL_LOOPS = 15625
+
+MODULE_FLOPS = [0, 14, 7, 17, 15, 29, 29, 12, 30]
+
+# ── polynomial helpers ────────────────────────────────────────────────────
+
+def poly_A(w):
+    return ((((((A[6]*w + A[5])*w + A[4])*w + A[3])*w + A[2])*w + A[1])*w + A[0])
+
+def poly_A_sin(w):
+    return ((((((A[6]*w - A[5])*w + A[4])*w - A[3])*w + A[2])*w + A[1])*w + A[0])
+
+def poly_B(w):
+    return w*(w*(w*(w*(w*(B[6]*w + B[5]) + B[4]) + B[3]) + B[2]) + B[1]) + B[0]
+
+# ── timing ────────────────────────────────────────────────────────────────
+
+def cpu_sec():
+    return time.process_time()
+
+def wall_sec():
+    return time.perf_counter()
+
+# ── parallel helpers ──────────────────────────────────────────────────────
+
+def _chunk_range(total, nworkers):
+    """Yield (start, end) 1-indexed ranges for [1, total)."""
+    chunk = total // nworkers
+    rem = total % nworkers
+    start = 1
+    for i in range(nworkers):
+        sz = chunk + (1 if i < rem else 0)
+        yield (start, start + sz)
+        start += sz
+
+def _run_chunk(args):
+    """Pickleable wrapper for a single chunk of work."""
+    (mod, start, end, step, use_numpy) = args
+    if use_numpy:
+        return _run_chunk_numpy(mod, start, end, step)
+    return _run_chunk_pure(mod, start, end, step)
+
+def _run_chunk_pure(mod, start, end, step):
+    """Pure-Python chunk worker."""
+    s = 0.0
+    t0 = cpu_sec()
+    if mod == 1:
+        for i in range(start, end):
+            u = i * step
+            s += (D[0] + u*(D[1] + u*D[2])) / (1.0 + u*(D[0] + u*(E[0] + u*E[1])))
+    elif mod == 3:
+        for i in range(start, end):
+            u = i * step
+            w = u * u
+            s += u * poly_A_sin(w)
+    elif mod == 4:
+        for i in range(start, end):
+            u = i * step
+            w = u * u
+            s += poly_B(w)
+    elif mod == 5:
+        for i in range(start, end):
+            u = i * step
+            w = u * u
+            s += (u * poly_A_sin(w)) / poly_B(w)
+    elif mod == 6:
+        for i in range(start, end):
+            u = i * step
+            w = u * u
+            s += (u * poly_A_sin(w)) * poly_B(w)
+    elif mod == 7:
+        for i in range(start, end):
+            x = i * step
+            u = x * x
+            s += -1.0/(x + 1.0) - x/(u + 1.0) - u/(x*u + 1.0)
+    elif mod == 8:
+        for i in range(start, end):
+            u = i * step
+            w = u * u
+            vb = poly_B(w)
+            va = u * poly_A_sin(w)
+            s += vb * vb * va
+    t1 = cpu_sec()
+    return (s, t1 - t0)
+
+# ── NumPy vectorized workers ──────────────────────────────────────────────
+
+_NUMPY_AVAILABLE = False
+try:
+    import numpy as np
+    _NUMPY_AVAILABLE = True
+except ImportError:
+    pass
+
+def _run_chunk_numpy(mod, start, end, step):
+    """NumPy vectorized chunk worker."""
+    import numpy as np
+    n = end - start
+    if n <= 0:
+        return (0.0, 0.0)
+    t0 = cpu_sec()
+    i = np.arange(start, end, dtype=np.float64)
+    if mod == 1:
+        u = i * step
+        s = np.sum((D[0] + u*(D[1] + u*D[2])) /
+                   (1.0 + u*(D[0] + u*(E[0] + u*E[1]))))
+    elif mod == 3:
+        u = i * step
+        w = u * u
+        s = np.sum(u * ((((((A[6]*w - A[5])*w + A[4])*w - A[3])*w + A[2])*w + A[1])*w + A[0]))
+    elif mod == 4:
+        u = i * step
+        w = u * u
+        s = np.sum(w*(w*(w*(w*(w*(B[6]*w + B[5]) + B[4]) + B[3]) + B[2]) + B[1]) + B[0])
+    elif mod == 5:
+        u = i * step
+        w = u * u
+        num = u * ((((((A[6]*w - A[5])*w + A[4])*w - A[3])*w + A[2])*w + A[1])*w + A[0])
+        den = w*(w*(w*(w*(w*(B[6]*w + B[5]) + B[4]) + B[3]) + B[2]) + B[1]) + B[0]
+        s = np.sum(num / den)
+    elif mod == 6:
+        u = i * step
+        w = u * u
+        num = u * ((((((A[6]*w - A[5])*w + A[4])*w - A[3])*w + A[2])*w + A[1])*w + A[0])
+        den = w*(w*(w*(w*(w*(B[6]*w + B[5]) + B[4]) + B[3]) + B[2]) + B[1]) + B[0]
+        s = np.sum(num * den)
+    elif mod == 7:
+        x = i * step
+        u = x * x
+        s = np.sum(-1.0/(x + 1.0) - x/(u + 1.0) - u/(x*u + 1.0))
+    elif mod == 8:
+        u = i * step
+        w = u * u
+        vb = w*(w*(w*(w*(w*(B[6]*w + B[5]) + B[4]) + B[3]) + B[2]) + B[1]) + B[0]
+        va = u * ((((((A[6]*w - A[5])*w + A[4])*w - A[3])*w + A[2])*w + A[1])*w + A[0])
+        s = np.sum(vb * vb * va)
+    t1 = cpu_sec()
+    return (float(s), t1 - t0)
+
+# ── parallel dispatch ─────────────────────────────────────────────────────
+
+def run_parallel(mod, nworkers, m, step, executor_cls, use_numpy=False):
+    """Run module `mod` over [1, m) split across `nworkers` workers."""
+    ranges = list(_chunk_range(m - 1, nworkers))
+    tasks = [(mod, s, e, step, use_numpy) for (s, e) in ranges]
+
+    s_total = 0.0
+    t_max = 0.0
+    with executor_cls(max_workers=nworkers) as ex:
+        futures = [ex.submit(_run_chunk, t) for t in tasks]
+        for fut in as_completed(futures):
+            s_part, t_part = fut.result()
+            s_total += s_part
+            if t_part > t_max:
+                t_max = t_part
+    return s_total, t_max
+
+# ── module 2 (always serial — loop-carried dependency) ────────────────────
+
+def run_module2(m):
+    """Run module 2 (pi via Maclaurin series). Returns (elapsed, pierr)."""
+    s = -5.0
+    sa = -1.0
+    for _ in range(1, m + 1):
+        s = -s
+        sa += s
+
+    u = sa
+    v = 0.0
+    w = 0.0
+    x = 0.0
+    t0 = cpu_sec()
+    for _ in range(1, m + 1):
+        s = -s
+        sa += s
+        u += 2.0
+        x += (s - u)
+        v -= s * u
+        w += s / u
+    elapsed = cpu_sec() - t0
+
+    piprg = (4.0 * w / 5.0) + 5.0 / v - 31.25 / (v * v * v)
+    pierr = piprg - PIREF
+    return elapsed, pierr
+
+# ── calibration ───────────────────────────────────────────────────────────
+
+def calibrate_serial(n):
+    """Quick calibration run for n iterations (module 1)."""
+    x = 1.0 / n
+    s = 0.0
+    t0 = cpu_sec()
+    for i in range(1, n):
+        u = i * x
+        s += (D[0] + u*(D[1] + u*D[2])) / (1.0 + u*(D[0] + u*(E[0] + u*E[1])))
+    return cpu_sec() - t0
+
+def calibrate(tlimit, nlimit):
+    n = INITIAL_LOOPS
+    while True:
+        n = 2 * n
+        t = calibrate_serial(n)
+        if t >= tlimit or n >= nlimit:
+            break
+    if n > nlimit:
+        n = nlimit
+    scale = 1.0e6 / n
+    return n, scale
+
+def nulltime_est(m, scale):
+    t0 = cpu_sec()
+    x = 0
+    for i in range(1, m):
+        x += 1
+    t1 = cpu_sec()
+    nt = scale * (t1 - t0)
+    return max(nt, 0.0)
+
+# ── main benchmark ────────────────────────────────────────────────────────
+
+def run_benchmark(nworkers, tlimit, nlimit, executor_cls, use_numpy=False):
+    """Run complete benchmark. Returns dict of results."""
+    wall0 = wall_sec()
+
+    m, scale = calibrate(tlimit, nlimit)
+    nt = nulltime_est(m, scale)
+
+    results = {
+        'nworkers': nworkers,
+        'mode': 'numpy' if use_numpy else ('mp' if executor_cls == ProcessPoolExecutor else 'thread'),
+        'loops': m,
+        'nulltime_us': nt * 1e6,
+        'scale': scale,
+        'tlimit': tlimit,
+        'modules': {},
+        'wall_sec': 0.0,
+    }
+
+    def adj_time(t_raw):
+        """Adjust raw CPU time: subtract nulltime per worker, apply scale."""
+        t_adj = scale * t_raw - nt / nworkers
+        return max(t_adj, 1e-15)
+
+    def calc_mflops(flops_per_iter, t_adj):
+        return (flops_per_iter * (m - 1)) / (t_adj * 1e6)
+
+    # Module 1
+    step = 1.0 / m
+    s, tmax = run_parallel(1, nworkers, m, step, executor_cls, use_numpy)
+    ta = adj_time(tmax)
+    sa = (D[0]+D[1]+D[2])/(1.0+D[0]+E[0]+E[1])
+    integral = step * (sa + D[0] + 2.0 * s) / 2.0
+    results['modules'][1] = {
+        'error': (1.0 / integral) - 25.2,
+        'runtime_us': scale * tmax * 1e6,
+        'mflops': calc_mflops(14, ta),
+    }
+
+    # Module 2 (serial)
+    elapsed, pierr = run_module2(m)
+    ta = scale * elapsed
+    if ta < 1e-15: ta = 1e-15
+    results['modules'][2] = {
+        'error': pierr,
+        'runtime_us': scale * elapsed * 1e6,
+        'mflops': (7.0 * m) / (ta * 1e6),
+    }
+
+    # Module 3
+    step = PIREF / (3.0 * m)
+    s, tmax = run_parallel(3, nworkers, m, step, executor_cls, use_numpy)
+    ta = adj_time(tmax)
+    u = PIREF / 3.0
+    sa = u * poly_A_sin(u*u)
+    results['modules'][3] = {
+        'error': step * (sa + 2.0 * s) / 2.0 - 0.5,
+        'runtime_us': scale * tmax * 1e6,
+        'mflops': calc_mflops(17, ta),
+    }
+
+    # Module 4
+    step = PIREF / (3.0 * m)
+    s, tmax = run_parallel(4, nworkers, m, step, executor_cls, use_numpy)
+    ta = adj_time(tmax)
+    u = PIREF / 3.0
+    w2 = u * u
+    sa = poly_B(w2)
+    integral = step * (sa + 1.0 + 2.0 * s) / 2.0
+    sb = u * poly_A_sin(w2)  # after original A3=-A3, A5=-A5
+    results['modules'][4] = {
+        'error': integral - sb,
+        'runtime_us': scale * tmax * 1e6,
+        'mflops': calc_mflops(15, ta),
+    }
+
+    # Module 5
+    step = PIREF / (3.0 * m)
+    s, tmax = run_parallel(5, nworkers, m, step, executor_cls, use_numpy)
+    ta = adj_time(tmax)
+    u = PIREF / 3.0
+    w2 = u * u
+    sa = (u * poly_A_sin(w2)) / poly_B(w2)
+    results['modules'][5] = {
+        'error': step * (sa + 2.0 * s) / 2.0 - 0.6931471805599453,
+        'runtime_us': scale * tmax * 1e6,
+        'mflops': calc_mflops(29, ta),
+    }
+
+    # Module 6
+    step = PIREF / (4.0 * m)
+    s, tmax = run_parallel(6, nworkers, m, step, executor_cls, use_numpy)
+    ta = adj_time(tmax)
+    u = PIREF / 4.0
+    w2 = u * u
+    sa = (u * poly_A_sin(w2)) * poly_B(w2)
+    results['modules'][6] = {
+        'error': step * (sa + 2.0 * s) / 2.0 - 0.25,
+        'runtime_us': scale * tmax * 1e6,
+        'mflops': calc_mflops(29, ta),
+    }
+
+    # Module 7
+    sa_const = 102.3321513995275
+    vstep = sa_const / m
+    s, tmax = run_parallel(7, nworkers, m, vstep, executor_cls, use_numpy)
+    ta = adj_time(tmax)
+    x = sa_const
+    u = x * x
+    base = -1.0 - 1.0/(x + 1.0) - x/(u + 1.0) - u/(x*u + 1.0)
+    sa = 18.0 * vstep * (base + 2.0 * s)
+    results['modules'][7] = {
+        'error': sa + 500.2,
+        'runtime_us': scale * tmax * 1e6,
+        'mflops': calc_mflops(12, ta),
+    }
+
+    # Module 8
+    step = PIREF / (3.0 * m)
+    s, tmax = run_parallel(8, nworkers, m, step, executor_cls, use_numpy)
+    ta = adj_time(tmax)
+    u = PIREF / 3.0
+    w2 = u * u
+    sa = (u * poly_A_sin(w2)) * poly_B(w2) * poly_B(w2)
+    results['modules'][8] = {
+        'error': step * (sa + 2.0 * s) / 2.0 - 0.29166666666666667,
+        'runtime_us': scale * tmax * 1e6,
+        'mflops': calc_mflops(30, ta),
+    }
+
+    results['wall_sec'] = wall_sec() - wall0
+
+    # MFLOPS aggregates
+    rt = {i: results['modules'][i]['runtime_us'] / 1e6 for i in range(1, 9)}
+    results['mflops1'] = 1.0 / ((5.0 * rt[2] + rt[3]) / 52.0)
+    results['mflops2'] = 1.0 / ((rt[1] + rt[3] + rt[4] + rt[5] + rt[6] + 4.0*rt[7]) / 152.0)
+    results['mflops3'] = 1.0 / ((rt[1] + rt[3] + rt[4] + rt[5] + rt[6] + rt[7] + rt[8]) / 146.0)
+    results['mflops4'] = 1.0 / ((rt[3] + rt[4] + rt[6] + rt[8]) / 91.0)
+
+    return results
+
+
+# ── output ────────────────────────────────────────────────────────────────
+
+def print_results_text(results, tlimit):
+    mode_str = results['mode']
+    print()
+    print(f"   FLOPS Python Program (Double Precision), V3.0")
+    print(f"   Workers: {results['nworkers']} ({mode_str})  |  Target: {tlimit:.1f} s  |  Wall: {results['wall_sec']:.2f} s")
+    print()
+    print("   Module     Error        RunTime      MFLOPS")
+    print("                            (usec)")
+    for i in range(1, 9):
+        m = results['modules'][i]
+        print(f"     {i}   {m['error']:13.4e}  {m['runtime_us']:10.4f}  {m['mflops']:10.4f}")
+    print()
+    print(f"   Iterations      = {results['loops']:10d}")
+    print(f"   NullTime (usec) = {results['nulltime_us']:10.4f}")
+    print(f"   MFLOPS(1)       = {results['mflops1']:10.4f}")
+    print(f"   MFLOPS(2)       = {results['mflops2']:10.4f}")
+    print(f"   MFLOPS(3)       = {results['mflops3']:10.4f}")
+    print(f"   MFLOPS(4)       = {results['mflops4']:10.4f}")
+    print()
+
+def print_results_json(results, tlimit):
+    out = {
+        'program': 'flops.py',
+        'version': '3.0',
+        'nworkers': results['nworkers'],
+        'mode': results['mode'],
+        'tlimit': tlimit,
+        'wall_sec': round(results['wall_sec'], 3),
+        'iterations': results['loops'],
+        'nulltime_us': round(results['nulltime_us'], 4),
+        'modules': [{'mod': i, **results['modules'][i]} for i in range(1, 9)],
+        'mflops1': round(results['mflops1'], 4),
+        'mflops2': round(results['mflops2'], 4),
+        'mflops3': round(results['mflops3'], 4),
+        'mflops4': round(results['mflops4'], 4),
+    }
+    print(json.dumps(out, indent=2))
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────
 
 def main():
-   TimeArray = [0.0, 0.0, 0.0]
-#double nulltime, TimeArray[3];   /* Variables needed for 'dtime()'.     */
-#double TLimit;                   /* Threshold to determine Number of    */
-#				 /* Loops to run. Fixed at 15.0 seconds.*/
-
-   T = [0.0 for x in range(36)]
-#double T[36];                    /* Global Array used to hold timing    */
-#				 /* results and other information.      */
-
-#double sa,sb,sc,sd,one,two,three;
-#double four,five,piref,piprg;
-#double scale,pierr;
-
-   A0 = 1.0
-   A1 = -0.1666666666671334
-   A2 = 0.833333333809067E-2
-   A3 = 0.198412715551283E-3
-   A4 = 0.27557589750762E-5
-   A5 = 0.2507059876207E-7
-   A6 = 0.164105986683E-9
-
-   B0 = 1.0
-   B1 = -0.4999999999982
-   B2 = 0.4166666664651E-1
-   B3 = -0.1388888805755E-2
-   B4 = 0.24801428034E-4
-   B5 = -0.2754213324E-6
-   B6 = 0.20189405E-8
-
-   C0 = 1.0
-   C1 = 0.99999999668
-   C2 = 0.49999995173
-   C3 = 0.16666704243
-   C4 = 0.4166685027E-1
-   C5 = 0.832672635E-2
-   C6 = 0.140836136E-2
-   C7 = 0.17358267E-3
-   C8 = 0.3931683E-4
-
-   D1 = 0.3999999946405E-1
-   D2 = 0.96E-3
-   D3 = 0.1233153E-5
-
-   E2 = 0.48E-3
-   E3 = 0.411051E-6
-
-   print("\n")
-   print("   FLOPS Python Program (Double Precision), V2.0 18 Dec 1992\n\n")
-
-# Initial number of loops. Original code claims this is a magic number.
-   loops = 15625
-
-#/****************************************************/
-#/* Set Variable Values.                             */
-#/* T[1] references all timing results relative to   */
-#/* one million loops.                               */
-#/*                                                  */
-#/* The program will execute from 31250 to 512000000 */
-#/* loops based on a runtime of Module 1 of at least */
-#/* TLimit = 15.0 seconds. That is, a runtime of 15  */
-#/* seconds for Module 1 is used to determine the    */
-#/* number of loops to execute.                      */
-#/*                                                  */
-#/* No more than NLimit = 512000000 loops are allowed*/
-#/****************************************************/
-
-   T[1] = 1.0E+06/loops
-
-   TLimit = 15.0
-   NLimit = 512000000
-
-   piref = 3.14159265358979324
-   one   = 1.0
-   two   = 2.0
-   three = 3.0
-   four  = 4.0
-   five  = 5.0
-   scale = one
-
-   print("   Module     Error        RunTime      MFLOPS\n")
-   print("                            (usec)\n")
-#/*************************/
-#/* Initialize the timer. */
-#/*************************/
-   
-   dtime(TimeArray)
-   dtime(TimeArray)
-   
-#/*******************************************************/
-#/* Module 1.  Calculate integral of df(x)/f(x) defined */
-#/*            below.  Result is ln(f(1)). There are 14 */
-#/*            double precision operations per loop     */
-#/*            ( 7 +, 0 -, 6 *, 1 / ) that are included */
-#/*            in the timing.                           */
-#/*            50.0% +, 00.0% -, 42.9% *, and 07.1% /   */
-#/*******************************************************/
-   n = loops
-   sa = 0.0
-
-   while sa < TLimit:
-      n = 2 * n
-      x = one / n    #                        /*********************/
-      s = 0.0                #                        /*  Loop 1.          */
-      v = 0.0                #                        /*********************/
-      w = one 
-
-      dtime(TimeArray)
-      for i in range(1,n):
-         v = v + w
-         u = v * x
-         s = s + (D1+u*(D2+u*D3))/(w+u*(D1+u*(E2+u*E3)))
-      dtime(TimeArray)
-      sa = TimeArray[1]
-
-      if n == NLimit:
-         break
-      #/* printf(" %10ld  %12.5lf\n",n,sa); */
-
-   scale = 1.0E+06 / n
-   T[1]  = scale
-
-#/****************************************/
-#/* Estimate nulltime ('for' loop time). */
-#/****************************************/
-   dtime(TimeArray)
-   for i in range(1, n):
-      pass
-   dtime(TimeArray)
-   nulltime = T[1] * TimeArray[1]
-   if nulltime < 0.0:
-      nulltime = 0.0
-
-   T[2] = T[1] * sa - nulltime
-
-   sa = (D1+D2+D3)/(one+D1+E2+E3)
-   sb = D1
-
-   T[3] = T[2] / 14.0#                             /*********************/
-   sa = x * ( sa + sb + two * s ) / two#           /* Module 1 Results. */
-   sb = one / sa#                                  /*********************/
-   n  = int( ( 40000 * sb ) / scale )
-   sc = sb - 25.2
-   T[4] = one / T[3]
-#						   /********************/
-#						   /*  DO NOT REMOVE   */
-#						   /*  THIS PRINTOUT!  */
-#//   printf("     1   %13.4le  %10.4lf  %10.4lf\n",sc,T[2],T[4])
-   print ("     1   %13.4e  %10.4f  %10.4f\n" % (sc,T[2],T[4]))
-
-   m = n
-
-#/*******************************************************/
-#/* Module 2.  Calculate value of PI from Taylor Series */
-#/*            expansion of atan(1.0).  There are 7     */
-#/*            double precision operations per loop     */
-#/*            ( 3 +, 2 -, 1 *, 1 / ) that are included */
-#/*            in the timing.                           */
-#/*            42.9% +, 28.6% -, 14.3% *, and 14.3% /   */
-#/*******************************************************/
-
-   s  = -five#                                      /********************/
-   sa = -one#                                       /* Loop 2.          */
-#						   /********************/
-   dtime(TimeArray)
-   for i in range(1, m+1):
-      s  = -s
-      sa = sa + s
-   dtime(TimeArray)
-   T[5] = T[1] * TimeArray[1]
-   if T[5] < 0.0:
-      T[5] = 0.0
-
-   sc   = m
-
-   u = sa#                                         /*********************/
-   v = 0.0#                                        /* Loop 3.           */
-   w = 0.0#                                        /*********************/
-   x = 0.0
-
-   dtime(TimeArray)
-   for i in range(1, m+1):
-      s  = -s
-      sa = sa + s
-      u  = u + two
-      x  = x +(s - u)
-      v  = v - s * u
-      w  = w + s / u
-   dtime(TimeArray)
-   T[6] = T[1] * TimeArray[1]
-
-   T[7] = ( T[6] - T[5] ) / 7.0#                   /*********************/
-   m  = int( sa * x  / sc )#                    /*  PI Results       */
-   sa = four * w / five#                           /*********************/
-   sb = sa + five / v
-   sc = 31.25
-   piprg = sb - sc / (v * v * v)
-   pierr = piprg - piref
-   T[8]  = one  / T[7]
-#						  /*********************/
-#						  /*   DO NOT REMOVE   */
-#						  /*   THIS PRINTOUT!  */
-#						  /*********************/
-   print ("     2   %13.4e  %10.4f  %10.4f\n" % (pierr,T[6]-T[5],T[8]))
-
-#/*******************************************************/
-#/* Module 3.  Calculate integral of sin(x) from 0.0 to */
-#/*            PI/3.0 using Trapazoidal Method. Result  */
-#/*            is 0.5. There are 17 double precision    */
-#/*            operations per loop (6 +, 2 -, 9 *, 0 /) */
-#/*            included in the timing.                  */
-#/*            35.3% +, 11.8% -, 52.9% *, and 00.0% /   */
-#/*******************************************************/
-
-   x = piref / ( three * m )#              /*********************/
-   s = 0.0#                                        /*  Loop 4.          */
-   v = 0.0#                                        /*********************/
-
-   dtime(TimeArray)
-   for i in range(1, m):
-      v = v + one
-      u = v * x
-      w = u * u
-      s = s + u * ((((((A6*w-A5)*w+A4)*w-A3)*w+A2)*w+A1)*w+one)
-   dtime(TimeArray)
-   T[9]  = T[1] * TimeArray[1] - nulltime
-
-   u  = piref / three
-   w  = u * u
-   sa = u * ((((((A6*w-A5)*w+A4)*w-A3)*w+A2)*w+A1)*w+one)
-
-   T[10] = T[9] / 17.0#                            /*********************/
-   sa = x * ( sa + two * s ) / two#                /* sin(x) Results.   */
-   sb = 0.5#                                       /*********************/
-   sc = sa - sb
-   T[11] = one / T[10]
-#						  /*********************/
-#						  /*   DO NOT REMOVE   */
-#						  /*   THIS PRINTOUT!  */
-#						  /*********************/
-   print ("     3   %13.4e  %10.4f  %10.4f\n" % (sc,T[9],T[11]))
-
-#/************************************************************/
-#/* Module 4.  Calculate Integral of cos(x) from 0.0 to PI/3 */
-#/*            using the Trapazoidal Method. Result is       */
-#/*            sin(PI/3). There are 15 double precision      */
-#/*            operations per loop (7 +, 0 -, 8 *, and 0 / ) */
-#/*            included in the timing.                       */
-#/*            50.0% +, 00.0% -, 50.0% *, 00.0% /            */
-#/************************************************************/
-   A3 = -A3
-   A5 = -A5
-   x = piref / ( three * m )#              /*********************/
-   s = 0.0#                                        /*  Loop 5.          */
-   v = 0.0#                                        /*********************/
-
-   dtime(TimeArray)
-   for i in range(1, m):
-      u = i * x
-      w = u * u
-      s = s + w*(w*(w*(w*(w*(B6*w+B5)+B4)+B3)+B2)+B1)+one
-   dtime(TimeArray)
-   T[12]  = T[1] * TimeArray[1] - nulltime
-
-   u  = piref / three
-   w  = u * u
-   sa = w*(w*(w*(w*(w*(B6*w+B5)+B4)+B3)+B2)+B1)+one
-
-   T[13] = T[12] / 15.0#                             /*******************/
-   sa = x * ( sa + one + two * s ) / two#            /* Module 4 Result */
-   u  = piref / three#                               /*******************/
-   w  = u * u
-   sb = u * ((((((A6*w+A5)*w+A4)*w+A3)*w+A2)*w+A1)*w+A0)
-   sc = sa - sb
-   T[14] = one / T[13]
-#						  /*********************/
-#						  /*   DO NOT REMOVE   */
-#						  /*   THIS PRINTOUT!  */
-#						  /*********************/
-   print ("     4   %13.4e  %10.4f  %10.4f\n" % (sc,T[12],T[14]))
-
-#/************************************************************/
-#/* Module 5.  Calculate Integral of tan(x) from 0.0 to PI/3 */
-#/*            using the Trapazoidal Method. Result is       */
-#/*            ln(cos(PI/3)). There are 29 double precision  */
-#/*            operations per loop (13 +, 0 -, 15 *, and 1 /)*/
-#/*            included in the timing.                       */
-#/*            46.7% +, 00.0% -, 50.0% *, and 03.3% /        */
-#/************************************************************/
-
-   x = piref / ( three * m )#              /*********************/
-   s = 0.0#                                        /*  Loop 6.          */
-   v = 0.0#                                        /*********************/
-
-   dtime(TimeArray)
-   for i in range(1, m):
-      u = i * x
-      w = u * u
-      v = u * ((((((A6*w+A5)*w+A4)*w+A3)*w+A2)*w+A1)*w+one)
-      s = s + v / (w*(w*(w*(w*(w*(B6*w+B5)+B4)+B3)+B2)+B1)+one)
-   dtime(TimeArray)
-   T[15]  = T[1] * TimeArray[1] - nulltime
-
-   u  = piref / three
-   w  = u * u
-   sa = u*((((((A6*w+A5)*w+A4)*w+A3)*w+A2)*w+A1)*w+one)
-   sb = w*(w*(w*(w*(w*(B6*w+B5)+B4)+B3)+B2)+B1)+one
-   sa = sa / sb
-
-   T[16] = T[15] / 29.0#                             /*******************/
-   sa = x * ( sa + two * s ) / two#                  /* Module 5 Result */
-   sb = 0.6931471805599453#                          /*******************/
-   sc = sa - sb
-   T[17] = one / T[16]
-#						  /*********************/
-#						  /*   DO NOT REMOVE   */
-#						  /*   THIS PRINTOUT!  */
-#						  /*********************/
-   print ("     5   %13.4e  %10.4f  %10.4f\n" % (sc,T[15],T[17]))
-
-#/************************************************************/
-#/* Module 6.  Calculate Integral of sin(x)*cos(x) from 0.0  */
-#/*            to PI/4 using the Trapazoidal Method. Result  */
-#/*            is sin(PI/4)^2. There are 29 double precision */
-#/*            operations per loop (13 +, 0 -, 16 *, and 0 /)*/
-#/*            included in the timing.                       */
-#/*            46.7% +, 00.0% -, 53.3% *, and 00.0% /        */
-#/************************************************************/
-
-   x = piref / ( four * m )#               /*********************/
-   s = 0.0#                                        /*  Loop 7.          */
-   v = 0.0#                                        /*********************/
-
-   dtime(TimeArray)
-   for i in range(1, m):
-      u = i * x
-      w = u * u
-      v = u * ((((((A6*w+A5)*w+A4)*w+A3)*w+A2)*w+A1)*w+one)
-      s = s + v*(w*(w*(w*(w*(w*(B6*w+B5)+B4)+B3)+B2)+B1)+one)
-   dtime(TimeArray)
-   T[18]  = T[1] * TimeArray[1] - nulltime
-
-   u  = piref / four
-   w  = u * u
-   sa = u*((((((A6*w+A5)*w+A4)*w+A3)*w+A2)*w+A1)*w+one)
-   sb = w*(w*(w*(w*(w*(B6*w+B5)+B4)+B3)+B2)+B1)+one
-   sa = sa * sb
-
-   T[19] = T[18] / 29.0#                             /*******************/
-   sa = x * ( sa + two * s ) / two#                  /* Module 6 Result */
-   sb = 0.25#                                        /*******************/
-   sc = sa - sb
-   T[20] = one / T[19]
-#						  /*********************/
-#						  /*   DO NOT REMOVE   */
-#						  /*   THIS PRINTOUT!  */
-#						  /*********************/
-   print ("     6   %13.4e  %10.4f  %10.4f\n" % (sc,T[18],T[20]))
-
-
-#/*******************************************************/
-#/* Module 7.  Calculate value of the definite integral */
-#/*            from 0 to sa of 1/(x+1), x/(x*x+1), and  */
-#/*            x*x/(x*x*x+1) using the Trapizoidal Rule.*/
-#/*            There are 12 double precision operations */
-#/*            per loop ( 3 +, 3 -, 3 *, and 3 / ) that */
-#/*            are included in the timing.              */
-#/*            25.0% +, 25.0% -, 25.0% *, and 25.0% /   */
-#/*******************************************************/
-
-#                                                  /*********************/
-   s = 0.0#                                        /* Loop 8.           */
-   w = one#                                        /*********************/
-   sa = 102.3321513995275
-   v = sa / m
-
-   dtime(TimeArray)
-   for i in range(1, m):
-      x = i * v
-      u = x * x
-      s = s - w / ( x + w ) - x / ( u + w ) - u / ( x * u + w )
-   dtime(TimeArray)
-   T[21] = T[1] * TimeArray[1] - nulltime
-#						  /*********************/
-#						  /* Module 7 Results  */
-#						  /*********************/
-   T[22] = T[21] / 12.0                                  
-   x  = sa                                      
-   u  = x * x
-   sa = -w - w / ( x + w ) - x / ( u + w ) - u / ( x * u + w )
-   sa = 18.0 * v * (sa + two * s )
-
-   m  = -2000 * int(sa)
-   m = int( m / scale )
-
-   sc = sa + 500.2
-   T[23] = one / T[22]
-#						  /********************/
-#						  /*  DO NOT REMOVE   */
-#						  /*  THIS PRINTOUT!  */
-#						  /********************/
-   print ("     7   %13.4e  %10.4f  %10.4f\n" % (sc,T[21],T[23]))
-
-#/************************************************************/
-#/* Module 8.  Calculate Integral of sin(x)*cos(x)*cos(x)    */
-#/*            from 0 to PI/3 using the Trapazoidal Method.  */
-#/*            Result is (1-cos(PI/3)^3)/3. There are 30     */
-#/*            double precision operations per loop included */
-#/*            in the timing:                                */
-#/*               13 +,     0 -,    17 *          0 /        */
-#/*            46.7% +, 00.0% -, 53.3% *, and 00.0% /        */
-#/************************************************************/
-
-   x = piref / ( three * m )#              /*********************/
-   s = 0.0#                                        /*  Loop 9.          */
-   v = 0.0#                                        /*********************/
-
-   dtime(TimeArray)
-   for i in range(1, m):
-      u = i * x
-      w = u * u
-      v = w*(w*(w*(w*(w*(B6*w+B5)+B4)+B3)+B2)+B1)+one
-      s = s + v*v*u*((((((A6*w+A5)*w+A4)*w+A3)*w+A2)*w+A1)*w+one)
-   dtime(TimeArray)
-   T[24]  = T[1] * TimeArray[1] - nulltime
-
-   u  = piref / three
-   w  = u * u
-   sa = u*((((((A6*w+A5)*w+A4)*w+A3)*w+A2)*w+A1)*w+one)
-   sb = w*(w*(w*(w*(w*(B6*w+B5)+B4)+B3)+B2)+B1)+one
-   sa = sa * sb * sb
-
-   T[25] = T[24] / 30.0#                             /*******************/
-   sa = x * ( sa + two * s ) / two#                  /* Module 8 Result */
-   sb = 0.29166666666666667#                         /*******************/
-   sc = sa - sb
-   T[26] = one / T[25]
-#						  /*********************/
-#						  /*   DO NOT REMOVE   */
-#						  /*   THIS PRINTOUT!  */
-#						  /*********************/
-   print ("     8   %13.4e  %10.4f  %10.4f\n" % (sc,T[24],T[26]))
-
-#/**************************************************/   
-#/* MFLOPS(1) output. This is the same weighting   */
-#/* used for all previous versions of the flops.c  */
-#/* program. Includes Modules 2 and 3 only.        */
-#/**************************************************/ 
-   T[27] = ( five * (T[6] - T[5]) + T[9] ) / 52.0
-   T[28] = one  / T[27]
-
-#/**************************************************/   
-#/* MFLOPS(2) output. This output does not include */
-#/* Module 2, but it still does 9.2% FDIV's.       */
-#/**************************************************/ 
-   T[29] = T[2] + T[9] + T[12] + T[15] + T[18]
-   T[29] = (T[29] + four * T[21]) / 152.0
-   T[30] = one / T[29]
-
-#/**************************************************/   
-#/* MFLOPS(3) output. This output does not include */
-#/* Module 2, but it still does 3.4% FDIV's.       */
-#/**************************************************/ 
-   T[31] = T[2] + T[9] + T[12] + T[15] + T[18]
-   T[31] = (T[31] + T[21] + T[24]) / 146.0
-   T[32] = one / T[31]
-
-#/**************************************************/   
-#/* MFLOPS(4) output. This output does not include */
-#/* Module 2, and it does NO FDIV's.               */
-#/**************************************************/ 
-   T[33] = (T[9] + T[12] + T[18] + T[24]) / 91.0
-   T[34] = one / T[33]
-
-
-   print ("\n")
-   print ("   Iterations      = %10d\n" % m)
-   print ("   NullTime (usec) = %10.4f\n" % nulltime)
-   print ("   MFLOPS(1)       = %10.4f\n" % T[28])
-   print ("   MFLOPS(2)       = %10.4f\n" % T[30])
-   print ("   MFLOPS(3)       = %10.4f\n" % T[32])
-   print ("   MFLOPS(4)       = %10.4f\n\n" % T[34])
-
-if __name__ == "__main__":
-   main()
+    ap = argparse.ArgumentParser(
+        description='flops.py V3.0 — MFLOPS benchmark (multi-core, multi-thread, NumPy)')
+    ap.add_argument('-j', '--jobs', type=int, default=None,
+                    help='Worker count (default: CPU count)')
+    ap.add_argument('-t', '--time', type=float, default=DEFAULT_TLIMIT,
+                    help=f'Runtime target seconds (default: {DEFAULT_TLIMIT})')
+    ap.add_argument('-s', '--single', action='store_true',
+                    help='Single-worker mode (= -j 1)')
+    ap.add_argument('--mode', choices=['mp', 'thread', 'numpy'], default='mp',
+                    help='Execution mode: mp (multiprocessing), thread (threading), numpy (NumPy vectorized)')
+    ap.add_argument('--json', action='store_true', help='JSON output')
+    ap.add_argument('--all-modes', action='store_true',
+                    help='Run all modes (serial, mp, thread, numpy) and compare')
+    ap.add_argument('-q', '--quiet', action='store_true',
+                    help='Only final summary')
+    ap.add_argument('--repeat', type=int, default=1,
+                    help='Run N times for statistical summary')
+
+    args = ap.parse_args()
+
+    nworkers = args.jobs
+    if nworkers is None:
+        nworkers = cpu_count()
+    if args.single:
+        nworkers = 1
+
+    tlimit = args.time
+
+    if args.mode == 'numpy' and not _NUMPY_AVAILABLE:
+        print("Error: NumPy is not installed. Install with: pip install numpy", file=sys.stderr)
+        sys.exit(1)
+
+    def get_executor(mode):
+        if mode == 'mp':
+            return ProcessPoolExecutor
+        elif mode == 'thread':
+            return ThreadPoolExecutor
+        else:
+            return ProcessPoolExecutor  # numpy uses mp underneath
+
+    if args.all_modes:
+        modes = [
+            ('serial', 1, ProcessPoolExecutor, False),
+            ('mp', nworkers, ProcessPoolExecutor, False),
+            ('thread', nworkers, ThreadPoolExecutor, False),
+        ]
+        if _NUMPY_AVAILABLE:
+            modes.append(('numpy', nworkers, ProcessPoolExecutor, True))
+        else:
+            print("# NumPy not available, skipping numpy mode", file=sys.stderr)
+
+        all_results = []
+        for label, nw, ex_cls, use_np in modes:
+            if not args.quiet:
+                print(f"\n=== {label.upper()} (workers={nw}) ===", file=sys.stderr)
+            r = run_benchmark(nw, tlimit, DEFAULT_NLIMIT, ex_cls, use_np)
+            r['label'] = label
+            all_results.append(r)
+
+        if args.json:
+            out = []
+            for r in all_results:
+                out.append({
+                    'label': r['label'],
+                    'nworkers': r['nworkers'],
+                    'mode': r['mode'],
+                    'wall_sec': round(r['wall_sec'], 3),
+                    'mflops1': round(r['mflops1'], 4),
+                    'mflops2': round(r['mflops2'], 4),
+                    'mflops3': round(r['mflops3'], 4),
+                    'mflops4': round(r['mflops4'], 4),
+                    'iterations': r['loops'],
+                })
+            print(json.dumps(out, indent=2))
+        else:
+            # Summary table
+            header = f"{'Mode':<12} {'Workers':>8} {'MFLOPS(1)':>12} {'MFLOPS(2)':>12} {'MFLOPS(3)':>12} {'MFLOPS(4)':>12} {'Wall(s)':>8}"
+            print()
+            print("=" * len(header))
+            for r in all_results:
+                if not args.quiet:
+                    print(f"\n--- {r['label']} ---")
+                    print_results_text(r, tlimit)
+            print(header)
+            print("-" * len(header))
+            baseline_m4 = None
+            for r in all_results:
+                print(f"{r['label']:<12} {r['nworkers']:>8} {r['mflops1']:>12.2f} {r['mflops2']:>12.2f} {r['mflops3']:>12.2f} {r['mflops4']:>12.2f} {r['wall_sec']:>8.2f}")
+                if baseline_m4 is None:
+                    baseline_m4 = r['mflops4']
+            print("-" * len(header))
+            # speedup row (vs serial)
+            if baseline_m4 and baseline_m4 > 0:
+                parts = ['Speedup vs serial']
+                for r in all_results:
+                    sp = r['mflops4'] / baseline_m4 if baseline_m4 > 0 else 0
+                    parts.append(f"  {r['label']}: {sp:.2f}x")
+                print('  '.join(parts))
+            print()
+    elif args.repeat > 1:
+        # Statistical mode
+        runs = []
+        for i in range(args.repeat):
+            if not args.quiet:
+                print(f"Run {i+1}/{args.repeat}...", file=sys.stderr)
+            r = run_benchmark(nworkers, tlimit, DEFAULT_NLIMIT,
+                             get_executor(args.mode), args.mode == 'numpy')
+            runs.append(r)
+        # Compute stats
+        metrics = ['mflops1', 'mflops2', 'mflops3', 'mflops4']
+        stats = {}
+        for key in metrics:
+            vals = [r[key] for r in runs]
+            stats[key] = {
+                'mean': sum(vals)/len(vals),
+                'min': min(vals), 'max': max(vals),
+                'std': (sum((v - sum(vals)/len(vals))**2 for v in vals) / len(vals))**0.5
+            }
+        if args.json:
+            print(json.dumps(stats, indent=2))
+        else:
+            for key in metrics:
+                s = stats[key]
+                print(f"{key}: mean={s['mean']:.2f}  min={s['min']:.2f}  max={s['max']:.2f}  std={s['std']:.2f}")
+    else:
+        r = run_benchmark(nworkers, tlimit, DEFAULT_NLIMIT,
+                         get_executor(args.mode), args.mode == 'numpy')
+        if args.json:
+            print_results_json(r, tlimit)
+        else:
+            print_results_text(r, tlimit)
+
+
+if __name__ == '__main__':
+    main()

@@ -160,7 +160,7 @@ For real-world performance evaluation, pair it with **LINPACK** (mixed compute +
 
 - **Al Aburto** — original `flops.c` V2.0 (1992), Naval Ocean Systems Center, San Diego
 - **Brian Olson** — multi-language ports, GitHub preservation ([brianolson/flops](https://github.com/brianolson/flops))
-- **CycleUser** — Python 3 adaptation (2021), V3.0 modernization (2025), Go/Rust ports, test suite ([Kivy-CN/flops](https://github.com/Kivy-CN/flops))
+- **CycleUser** — Python 3 adaptation (2021); V3.0 modernization (2025): refined Brian's C and Go versions with multi-threading/goroutines, added new Rust implementation, plus comprehensive test suite ([Kivy-CN/flops](https://github.com/Kivy-CN/flops))
 
 ---
 

@@ -160,7 +160,7 @@ flops 是一个**微观基准测试**（micro-benchmark）。它有意识地：
 
 - **Al Aburto** — 1992 年编写 flops.c V2.0，当时就职于美国海军海洋系统中心（NOSC），圣地亚哥
 - **Brian Olson** — 多语言转译并上传至 GitHub 保存（[brianolson/flops](https://github.com/brianolson/flops)）
-- **CycleUser** — 2021 年完成 Python 3 适配，2025 年完成 V3.0 全面现代化升级（C/Go/Python/Rust）、测试套件（[Kivy-CN/flops](https://github.com/Kivy-CN/flops)）
+- **CycleUser** — 2021 年完成 Python 3 适配；2025 年 V3.0 全面现代化升级：对 Brian 的 C 和 Go 版本做了多线程/goroutine 重构精炼，新增 Rust 实现，并编写了 40+ 测试的完整套件（[Kivy-CN/flops](https://github.com/Kivy-CN/flops)）
 
 ---
 

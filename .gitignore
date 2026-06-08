@@ -4,6 +4,7 @@
 a.out
 *.class
 wechat.md
+benchmark/wechat.md
 flops
 flops_go
 flops.O3
@@ -12,3 +13,4 @@ flops_rs/target/
 .codegraph/
 .reasonix/
 cpu_milestones.md
+benchmark/wechat.md

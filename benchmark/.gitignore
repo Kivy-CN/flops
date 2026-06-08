@@ -1,0 +1,5 @@
+*.o
+dhrystone
+stream
+fft_bench
+nbody

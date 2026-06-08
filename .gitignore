@@ -14,3 +14,4 @@ flops_rs/target/
 .reasonix/
 cpu_milestones.md
 benchmark/wechat.md
+.DS_Store
